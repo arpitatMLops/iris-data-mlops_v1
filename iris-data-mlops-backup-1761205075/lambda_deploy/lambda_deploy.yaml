@@ -1,0 +1,165 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Lambda deployer for iris-mlops pipeline
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: iris-mlops
+  LambdaCodeBucket:
+    Type: String
+    Description: Bucket where lambda.zip is stored
+  LambdaCodeKey:
+    Type: String
+    Description: Key (object name) for lambda.zip
+  CFNTemplateS3:
+    Type: String
+    Description: S3 URL (s3://...) of the iris-mlops pipeline template
+  ECRImageURI:
+    Type: String
+  S3BucketName:
+    Type: String
+  SageMakerRoleArn:
+    Type: String
+
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: LambdaCFNPolicyInline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # CloudFormation operations (manage stacks)
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:GetTemplate
+                  - cloudformation:ListStacks
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:ExecuteChangeSet
+                Resource: "*"
+
+              # Step Functions management (create/update/delete state machine)
+              - Effect: Allow
+                Action:
+                  - states:CreateStateMachine
+                  - states:UpdateStateMachine
+                  - states:DeleteStateMachine
+                  - states:TagResource
+                  - states:UntagResource
+                Resource: "*"
+
+              # EventBridge / CloudWatch Events permissions needed for managed rules that SFN uses
+              - Effect: Allow
+                Action:
+                  - events:PutRule
+                  - events:CreateRule
+                  - events:DeleteRule
+                  - events:PutTargets
+                  - events:RemoveTargets
+                  - events:DescribeRule
+                  - events:TagResource
+                  - events:UntagResource
+                Resource: "*"
+
+              # S3 read access to template and code bucket
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${LambdaCodeBucket}"
+                  - !Sub "arn:aws:s3:::${LambdaCodeBucket}/*"
+
+              # iam:PassRole - allow passing the SageMaker role AND the roles created for StepFunctions (scoped to this account)
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  - !Ref SageMakerRoleArn
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/*"
+
+              # IAM: create/manage/cleanup roles and policies (needed by CFN via deployer)
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:CreateServiceLinkedRole
+                  - iam:PutRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:DeleteRole
+                  - iam:DeleteRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:RemoveRoleFromInstanceProfile
+                  - iam:TagRole
+                  - iam:TagResources
+                  - iam:UntagResources
+                Resource:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/*"
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:policy/*"
+
+              # CloudWatch Logs permissions for Lambda + CFN cleanup (create, put, delete, describe)
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DeleteLogGroup
+                  - logs:DeleteLogStream
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:PutRetentionPolicy
+                Resource: "*"
+
+                # Allow starting Step Functions executions (required to run state machines)
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource:
+                  - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:*"
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-trigger"
+      Description: Deploy or update iris-mlops pipeline CloudFormation stack
+      Handler: lambda_trigger.lambda_handler
+      Runtime: python3.9
+      Timeout: 900
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      Environment:
+        Variables:
+          PIPELINE_TEMPLATE_S3: !Ref CFNTemplateS3
+          ECR_IMAGE_URI: !Ref ECRImageURI
+          S3_BUCKET_NAME: !Ref S3BucketName
+          SAGEMAKER_ROLE_ARN: !Ref SageMakerRoleArn
+
+Outputs:
+  LambdaName:
+    Description: Name of the created Lambda
+    Value: !Ref LambdaFunction
+  LambdaArn:
+    Description: ARN of the Lambda
+    Value: !GetAtt LambdaFunction.Arn
+  LambdaRoleArn:
+    Description: IAM role used by the Lambda
+    Value: !GetAtt LambdaExecutionRole.Arn

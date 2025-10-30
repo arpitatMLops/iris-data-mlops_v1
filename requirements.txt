@@ -1,0 +1,8 @@
+sagemaker-inference
+numpy
+pandas
+scikit-learn
+joblib
+boto3
+snowflake-connector-python[pandas]
+pyarrow

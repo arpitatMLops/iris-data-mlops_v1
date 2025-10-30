@@ -1,0 +1,252 @@
+Resources:
+  StateMachine3682c0c9:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      Definition:
+        Comment: Iris preprocess -> train
+        StartAt: Preprocess
+        States:
+          Preprocess:
+            Type: Task
+            Resource: arn:aws:states:::sagemaker:createProcessingJob.sync
+            Parameters:
+              ProcessingJobName.$: States.Format('iris-preprocess-{}', $.RunId)
+              RoleArn: ${sagemakercreateProcessingJob_RoleArn_e210217a}
+              AppSpecification:
+                ImageUri: >-
+                  182406535835.dkr.ecr.eu-north-1.amazonaws.com/sagemaker-studio-d-x5rfkjrvcd2t:default-20251013T175168
+              Environment:
+                STEP: preprocess
+              ProcessingResources:
+                ClusterConfig:
+                  InstanceCount: 1
+                  InstanceType: ml.t3.medium
+                  VolumeSizeInGB: 10
+              ProcessingOutputConfig:
+                Outputs:
+                  - OutputName: preprocessed
+                    S3Output:
+                      S3Uri.$: >-
+                        States.Format('s3://iris-mlops-bucket-182406535835/iris/output/{}/preprocessed',
+                        $.RunId)
+                      LocalPath: /opt/ml/processing/output
+                      S3UploadMode: EndOfJob
+            ResultPath: $.Preprocess
+            Next: Train
+          Train:
+            Type: Task
+            Resource: arn:aws:states:::sagemaker:createTrainingJob.sync
+            Parameters:
+              TrainingJobName.$: States.Format('iris-train-{}', $.RunId)
+              RoleArn: ${sagemakercreateProcessingJob_RoleArn_e210217a}
+              AlgorithmSpecification:
+                TrainingImage: >-
+                  182406535835.dkr.ecr.eu-north-1.amazonaws.com/sagemaker-studio-d-x5rfkjrvcd2t:default-20251013T175168
+                TrainingInputMode: File
+              InputDataConfig:
+                - ChannelName: train
+                  DataSource:
+                    S3DataSource:
+                      S3DataType: S3Prefix
+                      S3Uri.$: >-
+                        States.Format('s3://iris-mlops-bucket-182406535835/iris/output/{}/preprocessed/',
+                        $.RunId)
+                      S3DataDistributionType: FullyReplicated
+              OutputDataConfig:
+                S3OutputPath.$: >-
+                  States.Format('s3://iris-mlops-bucket-182406535835/iris/output/{}/model',
+                  $.RunId)
+              ResourceConfig:
+                InstanceCount: 1
+                InstanceType: ml.m5.large
+                VolumeSizeInGB: 30
+              StoppingCondition:
+                MaxRuntimeInSeconds: 1800
+            ResultPath: $.Train
+            Next: Inference
+          Inference:
+            Type: Task
+            Resource: arn:aws:states:::sagemaker:createProcessingJob.sync
+            Parameters:
+              ProcessingJobName.$: States.Format('iris-infer-{}', $.RunId)
+              RoleArn: ${sagemakercreateProcessingJob_RoleArn_e210217a}
+              AppSpecification:
+                ImageUri: >-
+                  182406535835.dkr.ecr.eu-north-1.amazonaws.com/sagemaker-studio-d-x5rfkjrvcd2t:default-20251013T175168
+              Environment:
+                STEP: infer
+              ProcessingInputs:
+                - InputName: data
+                  S3Input:
+                    S3Uri.$: >-
+                      States.Format('s3://iris-mlops-bucket-182406535835/iris/output/{}/preprocessed/processed.csv',
+                      $.RunId)
+                    LocalPath: /opt/ml/processing/input
+                    S3InputMode: File
+                    S3DataType: S3Prefix
+                - InputName: model
+                  S3Input:
+                    S3Uri.$: $.Train.ModelArtifacts.S3ModelArtifacts
+                    LocalPath: /opt/ml/processing/model
+                    S3InputMode: File
+                    S3DataType: S3Prefix
+              ProcessingOutputConfig:
+                Outputs:
+                  - OutputName: predictions
+                    S3Output:
+                      S3Uri.$: >-
+                        States.Format('s3://iris-mlops-bucket-182406535835/iris/output/{}/inference',
+                        $.RunId)
+                      LocalPath: /opt/ml/processing/output
+                      S3UploadMode: EndOfJob
+              ProcessingResources:
+                ClusterConfig:
+                  InstanceCount: 1
+                  InstanceType: ml.t3.medium
+                  VolumeSizeInGB: 10
+            End: true
+      DefinitionSubstitutions:
+        sagemakercreateProcessingJob_RoleArn_e210217a: >-
+          arn:aws:iam::182406535835:role/service-role/AmazonSageMaker-ExecutionRole-20251013T175169
+      RoleArn:
+        Fn::GetAtt:
+          - Rolea74e63e6
+          - Arn
+      StateMachineName: StateMachine3682c0c9
+      StateMachineType: STANDARD
+      EncryptionConfiguration:
+        Type: AWS_OWNED_KEY
+      LoggingConfiguration:
+        Level: 'OFF'
+        IncludeExecutionData: false
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: ''
+  Rolea74e63e6:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: StepFunctions_IAM_ROLE_prototype-iris301f55bc
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      MaxSessionDuration: 3600
+  Policy4eabff9b:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      PolicyName: XRayAccessPolicy971eb211
+      RoleName:
+        Ref: Rolea74e63e6
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - xray:PutTraceSegments
+              - xray:PutTelemetryRecords
+              - xray:GetSamplingRules
+              - xray:GetSamplingTargets
+            Resource:
+              - '*'
+  Policyb47188eb:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      PolicyName: SageMakerTrainingJobManagementFullAccessPolicy426485b1
+      RoleName:
+        Ref: Rolea74e63e6
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - sagemaker:CreateTrainingJob
+              - sagemaker:DescribeTrainingJob
+              - sagemaker:StopTrainingJob
+            Resource:
+              - arn:aws:sagemaker:eu-north-1:182406535835:training-job/*
+          - Effect: Allow
+            Action:
+              - sagemaker:ListTags
+            Resource:
+              - '*'
+          - Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource:
+              - >-
+                arn:aws:iam::182406535835:role/service-role/AmazonSageMaker-ExecutionRole-20251013T175169
+            Condition:
+              StringEquals:
+                iam:PassedToService: sagemaker.amazonaws.com
+          - Effect: Allow
+            Action:
+              - events:PutTargets
+              - events:PutRule
+              - events:DescribeRule
+            Resource:
+              - >-
+                arn:aws:events:eu-north-1:182406535835:rule/StepFunctionsGetEventsForSageMakerTrainingJobsRule
+  Policy76c45d6e:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      PolicyName: SageMakerProcessingJobManagementFullAccessPolicy2a6890d1
+      RoleName:
+        Ref: Rolea74e63e6
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - sagemaker:CreateProcessingJob
+              - sagemaker:DescribeProcessingJob
+              - sagemaker:StopProcessingJob
+              - sagemaker:ListTags
+            Resource:
+              - arn:aws:sagemaker:eu-north-1:182406535835:processing-job/*
+          - Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource:
+              - >-
+                arn:aws:iam::182406535835:role/service-role/AmazonSageMaker-ExecutionRole-20251013T175169
+            Condition:
+              StringEquals:
+                iam:PassedToService: sagemaker.amazonaws.com
+          - Effect: Allow
+            Action:
+              - events:PutTargets
+              - events:PutRule
+              - events:DescribeRule
+            Resource:
+              - >-
+                arn:aws:events:eu-north-1:182406535835:rule/StepFunctionsGetEventsForSageMakerProcessingJobsRule
+  Policy9cb4788a:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      PolicyName: stepfunctionpolicyc28952f3
+      RoleName:
+        Ref: Rolea74e63e6
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: SageMakerJobs
+            Effect: Allow
+            Action:
+              - sagemaker:CreateProcessingJob
+              - sagemaker:DescribeProcessingJob
+              - sagemaker:CreateTrainingJob
+              - sagemaker:DescribeTrainingJob
+              - sagemaker:AddTags
+              - sagemaker:DeleteTags
+              - sagemaker:ListTags
+            Resource:
+              - arn:aws:sagemaker:eu-north-1:182406535835:processing-job/*
+              - arn:aws:sagemaker:eu-north-1:182406535835:training-job/*
+          - Sid: PassSMExecutionRole
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: >-
+              arn:aws:iam::182406535835:role/service-role/AmazonSageMaker-ExecutionRole-20251013T175169

@@ -1,0 +1,114 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Infra stack for iris-mlops (Step Functions role + log group)
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: iris-mlops
+  SageMakerRoleArn:
+    Type: String
+    Description: ARN of the SageMaker Execution Role used by Processing/Training
+
+Resources:
+  StepFnLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/stepfunctions/${ProjectName}-pipeline"
+      RetentionInDays: 14
+
+  RoleStepFunctions:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      MaxSessionDuration: 3600
+      Policies:
+        - PolicyName: StepFunctionSageMakerAccessInline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+
+              # X-Ray (if needed)
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: "*"
+
+              # SageMaker training/processing actions
+              - Effect: Allow
+                Action:
+                  - sagemaker:CreateTrainingJob
+                  - sagemaker:DescribeTrainingJob
+                  - sagemaker:StopTrainingJob
+                  - sagemaker:CreateProcessingJob
+                  - sagemaker:DescribeProcessingJob
+                  - sagemaker:StopProcessingJob
+                  - sagemaker:ListTags
+                  - sagemaker:AddTags
+                  - sagemaker:DeleteTags
+                Resource:
+                  - !Sub "arn:aws:sagemaker:${AWS::Region}:*:training-job/*"
+                  - !Sub "arn:aws:sagemaker:${AWS::Region}:*:processing-job/*"
+
+              # Allow passing the SageMaker execution role to SageMaker
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  - !Ref SageMakerRoleArn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: sagemaker.amazonaws.com
+
+              # EventBridge / CloudWatch Events: allow creating managed rules & targets used by SFN
+              - Effect: Allow
+                Action:
+                  - events:PutRule
+                  - events:CreateRule
+                  - events:DeleteRule
+                  - events:PutTargets
+                  - events:RemoveTargets
+                  - events:DescribeRule
+                  - events:TagResource
+                  - events:UntagResource
+                  - events:PutPermission
+                Resource: "*"
+
+              # CloudWatch Logs permissions scoped to the Step Functions log group
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DescribeLogGroups
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/stepfunctions/${ProjectName}-pipeline"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/stepfunctions/${ProjectName}-pipeline:*"
+
+              # (Optional) additional log delivery management permissions
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                Resource: "*"
+
+Outputs:
+  StepFnLogGroupArn:
+    Description: ARN of the Step Functions CloudWatch Log Group
+    Value: !GetAtt StepFnLogGroup.Arn
+
+  RoleStepFunctionsArn:
+    Description: ARN of the StepFunctions IAM role
+    Value: !GetAtt RoleStepFunctions.Arn

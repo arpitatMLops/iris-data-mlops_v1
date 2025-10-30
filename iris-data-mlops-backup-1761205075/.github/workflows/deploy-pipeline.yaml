@@ -1,0 +1,109 @@
+name: CI/CD — build image, upload templates, deploy via Lambda
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: eu-north-1                
+  ECR_REPOSITORY: iris-mlops-prototype  
+  ECR_IMAGE_TAG: latest
+  S3_BUCKET: iris-mlops-bucket-182406535835
+  LAMBDA_S3_KEY: lambda_deploy/lambda.zip
+  PIPELINE_TEMPLATE_KEY: iris-mlops-pipeline.yaml
+  INFRA_TEMPLATE_KEY: infra.yaml
+  LAMBDA_LOCAL_ZIP: lambda.zip
+  LAMBDA_HANDLER_FILE: lambda_trigger.py
+  INFRA_STACK_NAME: iris-mlops-infra
+  PIPELINE_STACK_NAME: iris-mlops-pipeline
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set account id
+        id: acct
+        run: |
+          echo "AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_OUTPUT
+
+      - name: Login to ECR
+        run: |
+          aws ecr describe-repositories --repository-names "${{ env.ECR_REPOSITORY }}" >/dev/null 2>&1 || \
+            aws ecr create-repository --repository-name "${{ env.ECR_REPOSITORY }}" || true
+          ECR_REGISTRY="${{ steps.acct.outputs.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          echo "ECR_REGISTRY=${ECR_REGISTRY}" >> $GITHUB_ENV
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin $ECR_REGISTRY
+
+      - name: Build and push Docker image to ECR
+        run: |
+          ECR_REGISTRY=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+          IMAGE="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.ECR_IMAGE_TAG }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+        env:
+          AWS_ACCOUNT_ID: ${{ steps.acct.outputs.AWS_ACCOUNT_ID }}
+
+      - name: Zip Lambda code
+        run: |
+          # ensure lambda file exists
+          if [ ! -f "${{ env.LAMBDA_HANDLER_FILE }}" ]; then
+            echo "ERROR: ${LAMBDA_HANDLER_FILE} not found in repo root"
+            exit 1
+          fi
+          zip -r "${{ env.LAMBDA_LOCAL_ZIP }}" "${{ env.LAMBDA_HANDLER_FILE }}"
+
+      - name: Upload lambda.zip to S3
+        run: |
+          aws s3 cp "${{ env.LAMBDA_LOCAL_ZIP }}" "s3://${{ env.S3_BUCKET }}/${{ env.LAMBDA_S3_KEY }}"
+
+      - name: Upload CloudFormation templates to S3
+        run: |
+          aws s3 cp infra.yaml "s3://${{ env.S3_BUCKET }}/${{ env.INFRA_TEMPLATE_KEY }}"
+          aws s3 cp iris-mlops-pipeline.yaml "s3://${{ env.S3_BUCKET }}/${{ env.PIPELINE_TEMPLATE_KEY }}"
+
+      - name: Build payload.json for deployer Lambda
+        run: |
+          # Build the payload the deployer expects.
+          # cat > payload.json <<EOF
+{
+  "InfraTemplateS3": "s3://${{ env.S3_BUCKET }}/${{ env.INFRA_TEMPLATE_KEY }}",
+  "PipelineTemplateS3": "s3://${{ env.S3_BUCKET }}/${{ env.PIPELINE_TEMPLATE_KEY }}",
+  "InfraParameters": {
+    "ProjectName": "iris-mlops",
+    "SageMakerRoleArn": "${{ secrets.SAGEMAKER_ROLE_ARN }}"
+  },
+  "PipelineParameters": {
+    "ProjectName": "iris-mlops",
+    "ECRImageURI": "${{ steps.acct.outputs.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ env.ECR_IMAGE_TAG }}",
+    "S3BucketName": "${{ env.S3_BUCKET }}",
+    "SageMakerRoleArn": "${{ secrets.SAGEMAKER_ROLE_ARN }}"
+  },
+  "Capabilities": ["CAPABILITY_NAMED_IAM"]
+}
+EOF
+          echo "payload.json prepared:"
+          jq . payload.json || cat payload.json
+
+      - name: Invoke deployer Lambda
+        run: |
+          LAMBDA_NAME="${{ secrets.LAMBDA_NAME }}"
+          if [ -z "$LAMBDA_NAME" ]; then
+            echo "ERROR: set secret LAMBDA_NAME to your deployer Lambda function name"
+            exit 1
+          fi
+          aws lambda invoke --function-name "$LAMBDA_NAME" --payload file://payload.json --cli-binary-format raw-in-base64-out response.json
+          echo "Deployer response:"
+          cat response.json

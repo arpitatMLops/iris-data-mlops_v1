@@ -1,0 +1,7 @@
+sagemaker-inference
+flask
+numpy
+pandas
+scikit-learn
+joblib
+boto3

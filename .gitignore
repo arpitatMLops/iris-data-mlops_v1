@@ -1,0 +1,19 @@
+# secrets
+.git-credentials
+.env
+*.env
+*.pem
+*.key
+*.crt
+
+# caches & big local stuff
+.conda/
+.cache/
+.local/
+.venv/
+**/.ipynb_checkpoints/
+__pycache__/
+*.pyc
+.mypy_cache/
+.pytest_cache/
+.DS_Store

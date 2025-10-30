@@ -1,0 +1,146 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Iris pipeline (Preprocess -> Train -> Inference) via Step Functions + SageMaker
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: prototype-iris
+  ECRImageURI:
+    Type: String
+    Description: Full ECR image URI
+  S3BucketName:
+    Type: String
+    Description: Existing S3 bucket for outputs
+  SageMakerRoleArn:
+    Type: String
+    Description: ARN of the SageMaker Execution Role used by Processing/Training
+
+  # New: infra-provided resources (imported / passed from infra stack)
+  StepFnLogGroupArn:
+    Type: String
+    Description: ARN of the CloudWatch Log Group used by Step Functions (from infra stack)
+  RoleStepFunctionsArn:
+    Type: String
+    Description: ARN of the IAM Role for Step Functions (from infra stack)
+
+Resources:
+  # Note: StepFnLogGroup and RoleStepFunctions are provided by the infra stack.
+  # This template uses those passed-in ARNs instead of creating them here.
+
+  # --- State machine (parameterized) ---
+  StateMachine3682c0c9:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${ProjectName}-pipeline"
+      StateMachineType: STANDARD
+      RoleArn: !Ref RoleStepFunctionsArn
+      EncryptionConfiguration:
+        Type: AWS_OWNED_KEY
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              # add trailing :* so Step Functions can write to log streams under this group
+              LogGroupArn: !Sub "${StepFnLogGroupArn}"
+      Definition:
+        Comment: Iris preprocess -> train -> inference
+        StartAt: Preprocess
+        States:
+          Preprocess:
+            Type: Task
+            Resource: arn:aws:states:::sagemaker:createProcessingJob.sync
+            Parameters:
+              ProcessingJobName.$: States.Format('iris-preprocess-{}', $.RunId)
+              RoleArn: !Ref SageMakerRoleArn
+              AppSpecification:
+                ImageUri: !Ref ECRImageURI
+              Environment:
+                STEP: preprocess
+              ProcessingResources:
+                ClusterConfig:
+                  InstanceCount: 1
+                  InstanceType: ml.t3.medium
+                  VolumeSizeInGB: 10
+              ProcessingOutputConfig:
+                Outputs:
+                  - OutputName: preprocessed
+                    S3Output:
+                      S3Uri.$: !Sub "States.Format('s3://${S3BucketName}/iris/output/{}/preprocessed', $.RunId)"
+                      LocalPath: /opt/ml/processing/output
+                      S3UploadMode: EndOfJob
+            ResultPath: $.Preprocess
+            Next: Train
+
+          Train:
+            Type: Task
+            Resource: arn:aws:states:::sagemaker:createTrainingJob.sync
+            Parameters:
+              TrainingJobName.$: States.Format('iris-train-{}', $.RunId)
+              RoleArn: !Ref SageMakerRoleArn
+              AlgorithmSpecification:
+                TrainingImage: !Ref ECRImageURI
+                TrainingInputMode: File
+              InputDataConfig:
+                - ChannelName: train
+                  DataSource:
+                    S3DataSource:
+                      S3DataType: S3Prefix
+                      S3Uri.$: !Sub "States.Format('s3://${S3BucketName}/iris/output/{}/preprocessed/', $.RunId)"
+                      S3DataDistributionType: FullyReplicated
+              OutputDataConfig:
+                S3OutputPath.$: !Sub "States.Format('s3://${S3BucketName}/iris/output/{}/model', $.RunId)"
+              ResourceConfig:
+                InstanceCount: 1
+                InstanceType: ml.m5.large
+                VolumeSizeInGB: 30
+              StoppingCondition:
+                MaxRuntimeInSeconds: 1800
+            ResultPath: $.Train
+            Next: Inference
+
+          Inference:
+            Type: Task
+            Resource: arn:aws:states:::sagemaker:createProcessingJob.sync
+            Parameters:
+              ProcessingJobName.$: States.Format('iris-infer-{}', $.RunId)
+              RoleArn: !Ref SageMakerRoleArn
+              AppSpecification:
+                ImageUri: !Ref ECRImageURI
+              Environment:
+                STEP: infer
+              ProcessingInputs:
+                - InputName: data
+                  S3Input:
+                    S3Uri.$: !Sub "States.Format('s3://${S3BucketName}/iris/output/{}/preprocessed/processed.csv', $.RunId)"
+                    LocalPath: /opt/ml/processing/input
+                    S3InputMode: File
+                    S3DataType: S3Prefix
+                - InputName: model
+                  S3Input:
+                    S3Uri.$: $.Train.ModelArtifacts.S3ModelArtifacts
+                    LocalPath: /opt/ml/processing/model
+                    S3InputMode: File
+                    S3DataType: S3Prefix
+              ProcessingOutputConfig:
+                Outputs:
+                  - OutputName: predictions
+                    S3Output:
+                      S3Uri.$: !Sub "States.Format('s3://${S3BucketName}/iris/output/{}/inference', $.RunId)"
+                      LocalPath: /opt/ml/processing/output
+                      S3UploadMode: EndOfJob
+              ProcessingResources:
+                ClusterConfig:
+                  InstanceCount: 1
+                  InstanceType: ml.t3.medium
+                  VolumeSizeInGB: 10
+            End: true
+
+Outputs:
+  StateMachineArn:
+    Description: Step Functions state machine ARN
+    Value: !Ref StateMachine3682c0c9
+
+  StepFunctionsRoleArn:
+    Description: (Echo) Step Functions role ARN used by state machine
+    Value: !Ref RoleStepFunctionsArn

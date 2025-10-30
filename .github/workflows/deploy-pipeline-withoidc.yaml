@@ -1,0 +1,253 @@
+name: CI/CD — build image, upload templates, deploy via Lambda
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: eu-north-1
+  # ECR_REPOSITORY: iris-mlops-prototype
+  # ECR_IMAGE_TAG: latest
+  # S3_BUCKET: iris-mlops-bucket-182406535835
+  # LAMBDA_S3_KEY: lambda_deploy/lambda.zip
+  # PIPELINE_TEMPLATE_KEY: iris-mlops-pipeline.yaml
+  # INFRA_TEMPLATE_KEY: infra.yaml
+  # LAMBDA_LOCAL_ZIP: lambda.zip
+  # LAMBDA_HANDLER_FILE: lambda_trigger.py
+  # INFRA_STACK_NAME: iris-mlops-infra
+  # PIPELINE_STACK_NAME: iris-mlops-pipeline
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install OS deps (zip, jq)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y zip jq
+
+      # - name: Configure AWS credentials
+      #   uses: aws-actions/configure-aws-credentials@v2
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::182406535835:role/GithubOIDCrole
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Fetch CI config from Secrets Manager
+        id: fetch_ci_config
+        run: |
+          secrets=$(aws secretsmanager get-secret-value \
+            --region "${AWS_REGION}" \
+            --secret-id /iris-mlops/dev/ci-config \
+            --query SecretString --output text)
+          echo "secrets=$secrets" >> $GITHUB_OUTPUT
+
+      - name: Export CI config to env
+        run: |
+          ECR_REPOSITORY=$(echo "${{ steps.fetch_ci_config.outputs.secrets }}" | jq -r '.ECR_REPOSITORY')
+          ECR_IMAGE_TAG=$(echo "${{ steps.fetch_ci_config.outputs.secrets }}" | jq -r '.ECR_IMAGE_TAG')
+          S3_BUCKET=$(echo "${{ steps.fetch_ci_config.outputs.secrets }}" | jq -r '.S3_BUCKET')
+          LAMBDA_S3_KEY=$(echo "${{ steps.fetch_ci_config.outputs.secrets }}" | jq -r '.LAMBDA_S3_KEY')
+          PIPELINE_TEMPLATE_KEY=$(echo "${{ steps.fetch_ci_config.outputs.secrets }}" | jq -r '.PIPELINE_TEMPLATE_KEY')
+          INFRA_TEMPLATE_KEY=$(echo "${{ steps.fetch_ci_config.outputs.secrets }}" | jq -r '.INFRA_TEMPLATE_KEY')
+          LAMBDA_LOCAL_ZIP=$(echo "${{ steps.fetch_ci_config.outputs.secrets }}" | jq -r '.LAMBDA_LOCAL_ZIP')
+          LAMBDA_HANDLER_FILE=$(echo "${{ steps.fetch_ci_config.outputs.secrets }}" | jq -r '.LAMBDA_HANDLER_FILE')
+          INFRA_STACK_NAME=$(echo "${{ steps.fetch_ci_config.outputs.secrets }}" | jq -r '.INFRA_STACK_NAME')
+          PIPELINE_STACK_NAME=$(echo "${{ steps.fetch_ci_config.outputs.secrets }}" | jq -r '.PIPELINE_STACK_NAME')
+          SAGEMAKER_ROLE_ARN=$(echo "${{ steps.fetch_ci_config.outputs.secrets }}" | jq -r '.SAGEMAKER_ROLE_ARN')
+
+          {
+            echo "ECR_REPOSITORY=$ECR_REPOSITORY"
+            echo "ECR_IMAGE_TAG=$ECR_IMAGE_TAG"
+            echo "S3_BUCKET=$S3_BUCKET"
+            echo "LAMBDA_S3_KEY=$LAMBDA_S3_KEY"
+            echo "PIPELINE_TEMPLATE_KEY=$PIPELINE_TEMPLATE_KEY"
+            echo "INFRA_TEMPLATE_KEY=$INFRA_TEMPLATE_KEY"
+            echo "LAMBDA_LOCAL_ZIP=$LAMBDA_LOCAL_ZIP"
+            echo "LAMBDA_HANDLER_FILE=$LAMBDA_HANDLER_FILE"
+            echo "INFRA_STACK_NAME=$INFRA_STACK_NAME"
+            echo "PIPELINE_STACK_NAME=$PIPELINE_STACK_NAME"
+            echo "SAGEMAKER_ROLE_ARN=$SAGEMAKER_ROLE_ARN"
+          } >> $GITHUB_ENV
+
+      - name: Set account id
+        id: acct
+        run: |
+           AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+           echo "AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID" >> $GITHUB_ENV
+           echo "AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID" >> $GITHUB_OUTPUT
+
+      - name: Create ECR repo if missing and login
+        run: |
+          ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_ENV
+          if ! aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null 2>&1; then
+            echo "ECR repository $ECR_REPOSITORY not found. Creating the repo"
+            aws ecr create-repository --repository-name "$ECR_REPOSITORY"
+          else
+            echo "ECR repository $ECR_REPOSITORY already exists."
+          fi
+          aws ecr get-login-password --region "${{ env.AWS_REGION }}" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+      - name: Build and push Docker image to ECR
+        run: |
+          IMAGE="${ECR_REGISTRY}/$ECR_REPOSITORY:$ECR_IMAGE_TAG"
+          if [ -f Dockerfile ]; then
+            docker build -t "$IMAGE" .
+            docker push "$IMAGE"
+            echo "IMAGE_URI=$IMAGE" >> $GITHUB_ENV
+          else
+            echo "No Dockerfile found, skipping Docker build/push"
+          fi
+
+      - name: Zip Lambda code
+        run: |
+          if [ ! -f "$LAMBDA_HANDLER_FILE" ]; then
+            echo "ERROR: $LAMBDA_HANDLER_FILE not found in repo root"
+            exit 1
+          fi
+          zip -r "$LAMBDA_LOCAL_ZIP" "$LAMBDA_HANDLER_FILE"
+
+      - name: Upload lambda.zip to S3
+        run: |
+          aws s3 cp "$LAMBDA_LOCAL_ZIP" "s3://$S3_BUCKET/$LAMBDA_S3_KEY"
+
+      - name: Upload CloudFormation templates to S3
+        run: |
+          if [ ! -f infra.yaml ]; then
+            echo "ERROR: infra.yaml missing"
+            exit 1
+          fi
+          if [ ! -f iris-mlops-pipeline.yaml ]; then
+            echo "ERROR: iris-mlops-pipeline.yaml missing"
+            exit 1
+          fi
+          aws s3 cp infra.yaml "s3://$S3_BUCKET/$INFRA_TEMPLATE_KEY"
+          aws s3 cp iris-mlops-pipeline.yaml "s3://$S3_BUCKET/$PIPELINE_TEMPLATE_KEY"
+
+      - name: Deploy deployer CloudFormation stack
+        run: |
+          if [ ! -f lambda_deploy.yaml ]; then
+            echo "ERROR: lambda_deploy.yaml not found in repository root"
+            exit 1
+          fi
+
+          echo "Deploying CloudFormation stack iris-mlops-lambda-deployer from lambda_deploy.yaml"
+          aws cloudformation deploy \
+            --stack-name iris-mlops-lambda-deployer \
+            --template-file lambda_deploy.yaml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              ProjectName=iris-mlops \
+              LambdaCodeBucket="${S3_BUCKET}" \
+              LambdaCodeKey="${LAMBDA_S3_KEY}" \
+              CFNTemplateS3="s3://${S3_BUCKET}/${PIPELINE_TEMPLATE_KEY}" \
+              ECRImageURI="${IMAGE_URI}" \
+              S3BucketName="${S3_BUCKET}" \
+              SageMakerRoleArn="${SAGEMAKER_ROLE_ARN}"
+
+
+
+      - name: Build payload.json for deployer Lambda
+        run: |
+          python3 - <<'PY'
+import json, os, sys
+AWS_ACCOUNT_ID = os.getenv("AWS_ACCOUNT_ID", "")
+AWS_REGION = os.getenv("AWS_REGION", "eu-north-1")
+S3_BUCKET = os.getenv("S3_BUCKET")
+INFRA_KEY = os.getenv("INFRA_TEMPLATE_KEY")
+PIPELINE_KEY = os.getenv("PIPELINE_TEMPLATE_KEY")
+ECR_REPOSITORY = os.getenv("ECR_REPOSITORY")
+ECR_IMAGE_TAG = os.getenv("ECR_IMAGE_TAG")
+SAGEMAKER_ROLE_ARN = os.getenv("SAGEMAKER_ROLE_ARN", "")
+IMAGE_URI = os.getenv("IMAGE_URI")
+          
+payload = {
+  "InfraTemplateS3": f"s3://{S3_BUCKET}/{INFRA_KEY}",
+  "PipelineTemplateS3": f"s3://{S3_BUCKET}/{PIPELINE_KEY}",
+  "InfraParameters": {
+    "ProjectName": "iris-mlops",
+    "SageMakerRoleArn": SAGEMAKER_ROLE_ARN
+  },
+  "PipelineParameters": {
+    "ProjectName": "iris-mlops",
+    "ECRImageURI": IMAGE_URI,
+    "S3BucketName": S3_BUCKET,
+    "SageMakerRoleArn": SAGEMAKER_ROLE_ARN
+  },
+  "Capabilities": ["CAPABILITY_NAMED_IAM"],
+  "InfraStackName": "iris-mlops-infra",
+  "PipelineStackName": "iris-mlops-pipeline"
+}
+
+with open("payload.json","w") as f:
+    json.dump(payload, f, indent=2)
+print("payload.json written:")
+with open("payload.json") as f:
+    print(f.read())
+PY
+
+      - name: Invoke deployer Lambda (invoke alias from CFN outputs)
+        id: invoke_deployer
+        env:
+          STACK_NAME: iris-mlops-lambda-deployer
+        run: |
+          set -euo pipefail
+
+          echo "Fetching Lambda prod alias ARN from CloudFormation stack: $STACK_NAME"
+          LAMBDA_ALIAS_ARN=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='LambdaProdAliasArn'].OutputValue" \
+            --output text || echo "")
+
+          if [ -z "$LAMBDA_ALIAS_ARN" ] || [ "$LAMBDA_ALIAS_ARN" = "None" ]; then
+            echo "ERROR: LambdaProdAliasArn output not found in stack $STACK_NAME"
+            aws cloudformation describe-stacks --stack-name "$STACK_NAME" --output json
+            exit 1
+          fi
+
+          echo "Invoking deployer Lambda alias: $LAMBDA_ALIAS_ARN"
+          rm -f response.json
+          aws lambda invoke \
+            --function-name "$LAMBDA_ALIAS_ARN" \
+            --payload file://payload.json \
+            --cli-binary-format raw-in-base64-out \
+            response.json || true
+
+          echo "-------- raw response.json --------"
+          if [ -s response.json ]; then
+            cat response.json
+          else
+            echo "{}"
+
+            echo "{}" > response.json
+          fi
+          echo "-----------------------------------"
+
+          EXECUTION_ARN=$(jq -r '.executionArn // empty' response.json || echo "")
+          STATUS=$(jq -r '.status // empty' response.json || echo "")
+
+          echo "executionArn=$EXECUTION_ARN" >> $GITHUB_OUTPUT
+          echo "deployer_status=$STATUS" >> $GITHUB_OUTPUT
+
+          RAW=$(jq -c '.' response.json || echo "{}")
+          echo "raw_response=$RAW" >> $GITHUB_OUTPUT
+          
+      - name: Extract and print run ID
+        run: |
+          RUN_ID=$(jq -r '.executionArn' response.json | awk -F: '{print $NF}')
+          echo "Latest Step Function Run ID: $RUN_ID"
+
