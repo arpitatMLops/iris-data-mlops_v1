@@ -22,6 +22,7 @@ env:
 
 jobs:
   build-and-deploy:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
@@ -163,41 +164,29 @@ jobs:
       - name: Build payload.json for deployer Lambda
         run: |
           python3 - <<'PY'
-import json, os, sys
+import json, os
 AWS_ACCOUNT_ID = os.getenv("AWS_ACCOUNT_ID", "")
 AWS_REGION = os.getenv("AWS_REGION", "eu-north-1")
 S3_BUCKET = os.getenv("S3_BUCKET")
 INFRA_KEY = os.getenv("INFRA_TEMPLATE_KEY")
 PIPELINE_KEY = os.getenv("PIPELINE_TEMPLATE_KEY")
-ECR_REPOSITORY = os.getenv("ECR_REPOSITORY")
-ECR_IMAGE_TAG = os.getenv("ECR_IMAGE_TAG")
 SAGEMAKER_ROLE_ARN = os.getenv("SAGEMAKER_ROLE_ARN", "")
 IMAGE_URI = os.getenv("IMAGE_URI")
-          
+
 payload = {
-  "InfraTemplateS3": f"s3://{S3_BUCKET}/{INFRA_KEY}",
-  "PipelineTemplateS3": f"s3://{S3_BUCKET}/{PIPELINE_KEY}",
-  "InfraParameters": {
-    "ProjectName": "iris-mlops",
-    "SageMakerRoleArn": SAGEMAKER_ROLE_ARN
-  },
-  "PipelineParameters": {
-    "ProjectName": "iris-mlops",
-    "ECRImageURI": IMAGE_URI,
-    "S3BucketName": S3_BUCKET,
-    "SageMakerRoleArn": SAGEMAKER_ROLE_ARN
-  },
-  "Capabilities": ["CAPABILITY_NAMED_IAM"],
-  "InfraStackName": "iris-mlops-infra",
-  "PipelineStackName": "iris-mlops-pipeline"
+    "InfraTemplateS3": f"s3://{S3_BUCKET}/{INFRA_KEY}",
+    "PipelineTemplateS3": f"s3://{S3_BUCKET}/{PIPELINE_KEY}",
+    "InfraParameters": {"ProjectName": "iris-mlops", "SageMakerRoleArn": SAGEMAKER_ROLE_ARN},
+    "PipelineParameters": {"ProjectName": "iris-mlops", "ECRImageURI": IMAGE_URI, "S3BucketName": S3_BUCKET, "SageMakerRoleArn": SAGEMAKER_ROLE_ARN},
+    "Capabilities": ["CAPABILITY_NAMED_IAM"],
+    "InfraStackName": "iris-mlops-infra",
+    "PipelineStackName": "iris-mlops-pipeline"
 }
 
-with open("payload.json","w") as f:
-    json.dump(payload, f, indent=2)
-print("payload.json written:")
-with open("payload.json") as f:
-    print(f.read())
+open("payload.json","w").write(json.dumps(payload, indent=2))
+print("payload.json written.")
 PY
+
 
       - name: Invoke deployer Lambda (invoke alias from CFN outputs)
         id: invoke_deployer
