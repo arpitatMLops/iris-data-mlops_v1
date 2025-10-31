@@ -1,7 +1,7 @@
 name: CI/CD — build image, upload templates, deploy via Lambda
 
 on:
-  workflow_dispatch
+  workflow_dispatch:
 
 permissions:
   contents: read
