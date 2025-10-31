@@ -159,8 +159,6 @@ jobs:
               S3BucketName="${S3_BUCKET}" \
               SageMakerRoleArn="${SAGEMAKER_ROLE_ARN}"
 
-
-
       - name: Build payload.json for deployer Lambda
         run: |
           python3 - <<'PY'

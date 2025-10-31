@@ -221,7 +221,6 @@ if __name__ == "__main__":
         "PipelineTemplateS3": args.pipeline_template,
         "InfraParameters": {
             "ProjectName": "iris-mlops",
-            # ensure this role exists in your account
             "SageMakerRoleArn": "arn:aws:iam::182406535835:role/service-role/AmazonSageMaker-ExecutionRole-20251013T175169",
         },
         "PipelineParameters": {
