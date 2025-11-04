@@ -1,0 +1,30 @@
+version: 0.2
+
+env:
+  variables:
+    IMAGE_NAME: "iris-mlops-pipeline"
+    IMAGE_TAG: "latest"
+    REGION: "ap-south-1"
+    ACCOUNT_ID: "718036509811"  
+    ECR_URI: "718036509811.dkr.ecr.ap-south-1.amazonaws.com/iris-mlops-pipeline" 
+
+phases:
+  pre_build:
+    commands:
+      - echo "Logging in to Amazon ECR..."
+      - aws --version
+      - aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com
+  build:
+    commands:
+      - echo "Building the Docker image..."
+      - docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
+      - docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${ECR_URI}
+  post_build:
+    commands:
+      - echo "Pushing image to ECR..."
+      - docker push ${ECR_URI}
+      - echo "Image pushed: ${ECR_URI}"
+artifacts:
+  files:
+    - '**/*'
+  discard-paths: yes
