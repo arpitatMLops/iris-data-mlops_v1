@@ -1,8 +1,7 @@
-sagemaker-inference
 numpy
 pandas
-scikit-learn
+scikit-learn==1.2.2
+xgboost==1.7.6
 joblib
 boto3
-snowflake-connector-python[pandas]
-pyarrow
+mlflow

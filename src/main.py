@@ -18,7 +18,7 @@ def main():
       
         parser = argparse.ArgumentParser()
         parser.add_argument("--input-path", type=str,
-                            default="/opt/ml/input/data/train/processed.csv")
+                            default="/opt/ml/input/data/train")
         parser.add_argument("--model-path", type=str, default="/opt/ml/model")
         parser.add_argument("--n-estimators", type=int, default=20)
         args, _unknown = parser.parse_known_args()
