@@ -1,0 +1,185 @@
+{
+    "Version": "2020-12-01",
+    "Metadata": {},
+    "Parameters": [
+        {
+            "Name": "OutputPrefix",
+            "Type": "String",
+            "DefaultValue": "s3://sagemaker-pipelines-iris/pipelines/artifacts/preprocess"
+        },
+        {
+            "Name": "N_Estimators",
+            "Type": "Integer",
+            "DefaultValue": 20
+        }
+    ],
+    "PipelineExperimentConfig": {
+        "ExperimentName": {
+            "Get": "Execution.PipelineName"
+        },
+        "TrialName": {
+            "Get": "Execution.PipelineExecutionId"
+        }
+    },
+    "Steps": [
+        {
+            "Name": "PreprocessIris",
+            "Type": "Processing",
+            "Arguments": {
+                "ProcessingResources": {
+                    "ClusterConfig": {
+                        "InstanceType": "ml.m5.large",
+                        "InstanceCount": 1,
+                        "VolumeSizeInGB": 30
+                    }
+                },
+                "AppSpecification": {
+                    "ImageUri": "718036509811.dkr.ecr.ap-south-1.amazonaws.com/iris-mlops-pipeline:latest",
+                    "ContainerArguments": [
+                        "--output-dir",
+                        "/opt/ml/processing/output"
+                    ],
+                    "ContainerEntrypoint": [
+                        "python3",
+                        "/opt/ml/processing/input/code/preprocessing.py"
+                    ]
+                },
+                "RoleArn": "arn:aws:iam::718036509811:role/service-role/AmazonSageMaker-ExecutionRole-20251103T130228",
+                "ProcessingInputs": [
+                    {
+                        "InputName": "code",
+                        "AppManaged": false,
+                        "S3Input": {
+                            "S3Uri": "s3://sagemaker-ap-south-1-718036509811/iris-mlops-pipeline-2025-11-04-15-52-19-965/input/code/preprocessing.py",
+                            "LocalPath": "/opt/ml/processing/input/code",
+                            "S3DataType": "S3Prefix",
+                            "S3InputMode": "File",
+                            "S3DataDistributionType": "FullyReplicated",
+                            "S3CompressionType": "None"
+                        }
+                    }
+                ],
+                "ProcessingOutputConfig": {
+                    "Outputs": [
+                        {
+                            "OutputName": "processed",
+                            "AppManaged": false,
+                            "S3Output": {
+                                "S3Uri": {
+                                    "Std:Join": {
+                                        "On": "/",
+                                        "Values": [
+                                            "s3:/",
+                                            "sagemaker-ap-south-1-718036509811",
+                                            "IrisPreprocessTrain",
+                                            {
+                                                "Get": "Execution.PipelineExecutionId"
+                                            },
+                                            "PreprocessIris",
+                                            "output",
+                                            "processed"
+                                        ]
+                                    }
+                                },
+                                "LocalPath": "/opt/ml/processing/output",
+                                "S3UploadMode": "EndOfJob"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "Name": "TrainModel",
+            "Type": "Training",
+            "Arguments": {
+                "AlgorithmSpecification": {
+                    "TrainingInputMode": "File",
+                    "TrainingImage": "718036509811.dkr.ecr.ap-south-1.amazonaws.com/iris-mlops-pipeline:latest"
+                },
+                "OutputDataConfig": {
+                    "S3OutputPath": "s3://sagemaker-ap-south-1-718036509811/"
+                },
+                "StoppingCondition": {
+                    "MaxRuntimeInSeconds": 86400
+                },
+                "ResourceConfig": {
+                    "VolumeSizeInGB": 30,
+                    "InstanceCount": 1,
+                    "InstanceType": "ml.m5.large"
+                },
+                "RoleArn": "arn:aws:iam::718036509811:role/service-role/AmazonSageMaker-ExecutionRole-20251103T130228",
+                "InputDataConfig": [
+                    {
+                        "DataSource": {
+                            "S3DataSource": {
+                                "S3DataType": "S3Prefix",
+                                "S3Uri": {
+                                    "Get": "Steps.PreprocessIris.ProcessingOutputConfig.Outputs['processed'].S3Output.S3Uri"
+                                },
+                                "S3DataDistributionType": "FullyReplicated"
+                            }
+                        },
+                        "ChannelName": "train"
+                    }
+                ],
+                "HyperParameters": {
+                    "n-estimators": {
+                        "Std:Join": {
+                            "On": "",
+                            "Values": [
+                                {
+                                    "Get": "Parameters.N_Estimators"
+                                }
+                            ]
+                        }
+                    },
+                    "sagemaker_submit_directory": "\"s3://sagemaker-ap-south-1-718036509811/iris-mlops-pipeline-2025-11-04-15-52-19-995/source/sourcedir.tar.gz\"",
+                    "sagemaker_program": "\"../model_training/sagemaker_train.py\"",
+                    "sagemaker_container_log_level": "20",
+                    "sagemaker_region": "\"ap-south-1\""
+                },
+                "DebugHookConfig": {
+                    "S3OutputPath": "s3://sagemaker-ap-south-1-718036509811/",
+                    "CollectionConfigurations": []
+                },
+                "ProfilerConfig": {
+                    "S3OutputPath": "s3://sagemaker-ap-south-1-718036509811/",
+                    "DisableProfiler": false
+                }
+            }
+        },
+        {
+            "Name": "RegisterIrisModel-RegisterModel",
+            "Type": "RegisterModel",
+            "Arguments": {
+                "ModelPackageGroupName": "IrisModels",
+                "InferenceSpecification": {
+                    "Containers": [
+                        {
+                            "Image": "718036509811.dkr.ecr.ap-south-1.amazonaws.com/iris-mlops-pipeline:latest",
+                            "ModelDataUrl": {
+                                "Get": "Steps.TrainModel.ModelArtifacts.S3ModelArtifacts"
+                            }
+                        }
+                    ],
+                    "SupportedContentTypes": [
+                        "text/csv",
+                        "application/json"
+                    ],
+                    "SupportedResponseMIMETypes": [
+                        "application/json"
+                    ],
+                    "SupportedRealtimeInferenceInstanceTypes": [
+                        "ml.m5.large"
+                    ],
+                    "SupportedTransformInstanceTypes": [
+                        "ml.m5.large"
+                    ]
+                },
+                "ModelApprovalStatus": "PendingManualApproval",
+                "SkipModelValidation": "None"
+            }
+        }
+    ]
+}

@@ -1,0 +1,112 @@
+Resources:
+  StateMachine527f6298:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      Definition:
+        Comment: A description of my state machine
+        StartAt: StartPipelineExecution
+        States:
+          StartPipelineExecution:
+            Type: Task
+            Parameters:
+              ClientRequestToken.$: $$.Execution.Id
+              PipelineName: IrisPreprocessTrain
+              PipelineParameters:
+                - Name: N_Estimators
+                  Value.$: $.N_Estimators
+                - Name: OutputPrefix
+                  Value.$: $.OutputPrefix
+            Resource: arn:aws:states:::aws-sdk:sagemaker:startPipelineExecution
+            ResultPath: $.Start
+            Next: Wait
+          Wait:
+            Type: Wait
+            Seconds: 60
+            Next: DescribePipelineExecution
+          DescribePipelineExecution:
+            Type: Task
+            Parameters:
+              PipelineExecutionArn.$: $.Start.PipelineExecutionArn
+            Resource: arn:aws:states:::aws-sdk:sagemaker:describePipelineExecution
+            ResultPath: $.Describe
+            Next: Choice
+          Choice:
+            Type: Choice
+            Choices:
+              - Next: Success
+                Variable: $.Describe.PipelineExecutionStatus
+                StringEquals: Succeeded
+              - Next: Fail
+                Variable: $.Describe.PipelineExecutionStatus
+                StringEquals: Failed
+              - Next: Fail
+                Variable: $.Describe.PipelineExecutionStatus
+                StringEquals: Stopped
+            Default: Wait
+          Success:
+            Type: Succeed
+          Fail:
+            Type: Fail
+        QueryLanguage: JSONPath
+      RoleArn:
+        Fn::GetAtt:
+          - Role471188c9
+          - Arn
+      StateMachineName: StateMachine527f6298
+      StateMachineType: STANDARD
+      EncryptionConfiguration:
+        Type: AWS_OWNED_KEY
+      LoggingConfiguration:
+        Level: 'OFF'
+        IncludeExecutionData: false
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: ''
+  Role471188c9:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: iris-mlops-sfn-role-dev
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      MaxSessionDuration: 3600
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+  Policy42438c8c:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      PolicyName: XRayAccessPolicya2c9b904
+      RoleName:
+        Ref: Role471188c9
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - xray:PutTraceSegments
+              - xray:PutTelemetryRecords
+              - xray:GetSamplingRules
+              - xray:GetSamplingTargets
+            Resource:
+              - '*'
+  Policy4fd054ec:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      PolicyName: sagemakerbbfd096f
+      RoleName:
+        Ref: Role471188c9
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - sagemaker:StartPipelineExecution
+              - sagemaker:DescribePipelineExecution
+              - sagemaker:StopPipelineExecution
+              - sagemaker:ListPipelines
+              - sagemaker:DescribePipeline
+            Resource: '*'

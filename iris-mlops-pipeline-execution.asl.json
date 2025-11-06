@@ -1,0 +1,68 @@
+{
+  "Comment": "A description of my state machine",
+  "StartAt": "StartPipelineExecution",
+  "States": {
+    "StartPipelineExecution": {
+      "Type": "Task",
+      "Parameters": {
+        "ClientRequestToken.$": "$$.Execution.Id",
+        "PipelineName": "IrisPreprocessTrain",
+        "PipelineParameters": [
+          {
+            "Name": "N_Estimators",
+            "Value.$": "$.N_Estimators"
+          },
+          {
+            "Name": "OutputPrefix",
+            "Value.$": "$.OutputPrefix"
+          }
+        ]
+      },
+      "Resource": "arn:aws:states:::aws-sdk:sagemaker:startPipelineExecution",
+      "ResultPath": "$.Start",
+      "Next": "Wait"
+    },
+    "Wait": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "DescribePipelineExecution"
+    },
+    "DescribePipelineExecution": {
+      "Type": "Task",
+      "Parameters": {
+        "PipelineExecutionArn.$": "$.Start.PipelineExecutionArn"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:sagemaker:describePipelineExecution",
+      "ResultPath": "$.Describe",
+      "Next": "Choice"
+    },
+    "Choice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Next": "Success",
+          "Variable": "$.Describe.PipelineExecutionStatus",
+          "StringEquals": "Succeeded"
+        },
+        {
+          "Next": "Fail",
+          "Variable": "$.Describe.PipelineExecutionStatus",
+          "StringEquals": "Failed"
+        },
+        {
+          "Next": "Fail",
+          "Variable": "$.Describe.PipelineExecutionStatus",
+          "StringEquals": "Stopped"
+        }
+      ],
+      "Default": "Wait"
+    },
+    "Success": {
+      "Type": "Succeed"
+    },
+    "Fail": {
+      "Type": "Fail"
+    }
+  },
+  "QueryLanguage": "JSONPath"
+}

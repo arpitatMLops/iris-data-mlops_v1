@@ -1,0 +1,115 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Minimal CFN for SFN that references ASL in S3
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, qa, prod]
+    Default: dev
+  AppName:
+    Type: String
+    Default: iris-mlops
+  TemplatesBucket:
+    Type: String
+    Description: S3 bucket that holds the ASL JSON
+  AslKey:
+    Type: String
+    Description: S3 key for the ASL JSON
+  PipelineName:
+    Type: String
+    Default: IrisPreprocessTrain
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+
+Resources:
+  SfnLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/vendedlogs/states/${AppName}-${Environment}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  SfnRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-sfn-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LogsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: "*"
+
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:PutRetentionPolicy
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/states/${AppName}-${Environment}"
+
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/states/${AppName}-${Environment}:*"
+
+        - PolicyName: SageMakerPipelineControl
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Scope StartPipelineExecution to your pipeline name
+              - Effect: Allow
+                Action:
+                  - sagemaker:StartPipelineExecution
+                Resource: !Sub "arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:pipeline/${PipelineName}"
+              - Effect: Allow
+                Action:
+                  - sagemaker:DescribePipelineExecution
+                  - sagemaker:StopPipelineExecution
+                Resource: "*"
+
+  StateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${AppName}-${Environment}-cfn"
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt SfnRole.Arn
+      DefinitionS3Location:
+        Bucket: !Ref TemplatesBucket
+        Key: !Ref AslKey
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt SfnLogGroup.Arn
+
+Outputs:
+  StateMachineArn:
+    Value: !Ref StateMachine
+  StateMachineName:
+    Value: !Sub "${AppName}-${Environment}-cfn"
+  RoleArn:
+    Value: !GetAtt SfnRole.Arn
+  LogGroupName:
+    Value: !Ref SfnLogGroup
