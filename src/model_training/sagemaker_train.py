@@ -30,7 +30,7 @@ def model_train(input_path: str, model_path: str, n_estimators: int = 20):
 
     Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "arn:aws:sagemaker:eu-north-1:718036509811:mlflow-tracking-server/mlflow-iris-tracking"))
+    mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "arn:aws:sagemaker:ap-south-1:718036509811:mlflow-tracking-server/iris-sagemaker-tracking"))
     mlflow.set_experiment(os.getenv("MLFLOW_EXPERIMENT_NAME", "iris-sagemaker"))
 
     with mlflow.start_run():

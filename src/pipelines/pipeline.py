@@ -4,21 +4,21 @@ from sagemaker.session import Session
 from sagemaker.workflow.pipeline_context import PipelineSession
 from sagemaker import get_execution_role
 from sagemaker.workflow.pipeline import Pipeline
-from sagemaker.workflow.steps import ProcessingStep
+from sagemaker.workflow.steps import ProcessingStep,TrainingStep
 from sagemaker.workflow.parameters import ParameterString,ParameterInteger
-from sagemaker.processing import ProcessingOutput
-from sagemaker.sklearn.processing import SKLearnProcessor
-
-from sagemaker.sklearn.estimator import SKLearn
+from sagemaker.processing import ProcessingOutput,ScriptProcessor,ProcessingInput
+from sagemaker.estimator import Estimator
 from sagemaker.inputs import TrainingInput
-from sagemaker.workflow.steps import TrainingStep
+# from sagemaker.workflow.model_step import RegisterModel
+from sagemaker.workflow.step_collections import RegisterModel
 
-REGION = "eu-north-1"
+REGION = "ap-south-1"
 boto_sess = boto3.Session(region_name=REGION)
 sm_sess = Session(boto_sess)
 pipe_sess = PipelineSession(boto_sess)
 role = get_execution_role()
 bucket = "sagemaker-pipelines-iris"
+IMAGE_URI="718036509811.dkr.ecr.ap-south-1.amazonaws.com/iris-mlops-pipeline:latest"
 
 output_prefix = ParameterString(
     name="OutputPrefix",
@@ -29,24 +29,26 @@ n_estimators_param = ParameterInteger(
     name="N_Estimators", default_value=20
 )
 
-preproc = SKLearnProcessor(
-    framework_version="1.2-1",
+preproc = ScriptProcessor(
+    image_uri=IMAGE_URI,
     role=role,
-    instance_type="ml.t3.medium",
+    command=["python3"],
+    # instance_type="ml.t3.medium",
+    instance_type="ml.m5.large",
     instance_count=1,
     sagemaker_session=pipe_sess,
 )
 
-trainer = SKLearn(
-    entry_point="../model_training/sagemaker_train.py", 
-    framework_version="1.2-1",
+trainer = Estimator(
+    image_uri=IMAGE_URI,
     role=role,
-    instance_type="ml.t3.medium",
+    # instance_type="ml.t3.medium",
+    instance_type="ml.m5.large",
     instance_count=1,
     sagemaker_session=pipe_sess,
-    hyperparameters={
-        "n-estimators": n_estimators_param
-    },
+    entry_point="../model_training/sagemaker_train.py",
+    source_dir=os.path.join(os.path.dirname(__file__), "../model_training"),
+    hyperparameters={"n-estimators": n_estimators_param},
 )
 
 step_preprocess = ProcessingStep(
@@ -74,10 +76,22 @@ step_train = TrainingStep(
     }
 )
 
+step_register = RegisterModel(
+    name="RegisterIrisModel",
+    estimator=trainer,
+    model_data=step_train.properties.ModelArtifacts.S3ModelArtifacts,
+    image_uri=IMAGE_URI,
+    content_types=["text/csv","application/json"],
+    response_types=["application/json"],
+    inference_instances=["ml.m5.large"],
+    transform_instances=["ml.m5.large"],
+    model_package_group_name="IrisModels",
+)
+
 pipeline = Pipeline(
     name="IrisPreprocessTrain",
     parameters=[output_prefix,n_estimators_param],
-    steps=[step_preprocess,step_train],
+    steps=[step_preprocess,step_train,step_register],
     sagemaker_session=pipe_sess,
 )
 
