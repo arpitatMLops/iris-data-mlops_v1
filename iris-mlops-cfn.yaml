@@ -1,0 +1,269 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: iris-mlops — Artifacts (S3/ECR) + IAM + optional SageMaker Pipeline + Step Functions Orchestrator
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: iris-mlops
+
+  Environment:
+    Type: String
+    AllowedValues: [dev, qa, prod]
+    Default: dev
+
+  # Path to your exported pipeline.json in the artifacts bucket
+  PipelineDefKey:
+    Type: String
+    Default: pipelines/dev/pipeline.json
+    Description: Path to pipeline.json inside the artifacts bucket (upload before enabling pipeline)
+
+  # Toggle SageMaker::Pipeline creation (set true after uploading pipeline.json to S3)
+  CreateSageMakerPipeline:
+    Type: String
+    AllowedValues: [true, false]
+    Default: false
+
+Conditions:
+  DoCreatePipeline: !Equals [!Ref CreateSageMakerPipeline, 'true']
+
+Resources:
+
+  ########################################
+  # Artifacts
+  ########################################
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ProjectName}-artifacts-${Environment}-${AWS::AccountId}-${AWS::Region}
+      VersioningConfiguration: { Status: Enabled }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+
+  ArtifactsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub arn:aws:s3:::${ArtifactsBucket}
+              - !Sub arn:aws:s3:::${ArtifactsBucket}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${ProjectName}-${Environment}
+      ImageScanningConfiguration: { ScanOnPush: true }
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 20 images",
+                "selection": { "tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 20 },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  ########################################
+  # IAM
+  ########################################
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-sagemaker-exec
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: sagemaker.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: sm-exec-s3-ecr-logs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # S3 read/write for artifacts
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::${ArtifactsBucket}
+                  - !Sub arn:aws:s3:::${ArtifactsBucket}/*
+              # Pull images from ECR
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:DescribeImages
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                Resource: !GetAtt EcrRepository.Arn
+              # CloudWatch Logs from jobs
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              # Allow SageMaker jobs used by your pipeline
+              - Effect: Allow
+                Action:
+                  - sagemaker:CreateProcessingJob
+                  - sagemaker:CreateTrainingJob
+                  - sagemaker:CreateModel
+                  - sagemaker:CreateTransformJob
+                  - sagemaker:Describe*
+                  - sagemaker:List*
+                Resource: "*"
+
+  SfnExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-sfn-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: states.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: sfn-sagemaker-orchestrate
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Start & monitor SageMaker Pipeline executions
+              - Effect: Allow
+                Action:
+                  - sagemaker:StartPipelineExecution
+                  - sagemaker:DescribePipelineExecution
+                  - sagemaker:DescribePipeline
+                  - sagemaker:ListPipelineExecutions
+                Resource: "*"
+              # CloudWatch Logs for the state machine
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  ########################################
+  # Logs for SFN
+  ########################################
+  SfnLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/states/${ProjectName}-${Environment}
+      RetentionInDays: 14
+
+  ########################################
+  # SageMaker Pipeline (from exported JSON)
+  ########################################
+  SageMakerPipeline:
+    Type: AWS::SageMaker::Pipeline
+    Condition: DoCreatePipeline
+    Properties:
+      PipelineName: !Sub ${ProjectName}-${Environment}
+      RoleArn: !GetAtt SageMakerExecutionRole.Arn
+      PipelineDescription: !Sub "${ProjectName} ${Environment} pipeline created by CloudFormation"
+      PipelineDefinitionS3Location:
+        Bucket: !Ref ArtifactsBucket
+        Key: !Ref PipelineDefKey
+
+  ########################################
+  # Step Functions Orchestrator
+  ########################################
+  Orchestrator:
+    Type: AWS::StepFunctions::StateMachine
+    Condition: DoCreatePipeline
+    Properties:
+      StateMachineName: !Sub ${ProjectName}-${Environment}-orchestrator
+      RoleArn: !GetAtt SfnExecutionRole.Arn
+      LoggingConfiguration:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt SfnLogs.Arn
+        Level: ALL
+        IncludeExecutionData: true
+      DefinitionString:
+        Fn::Sub: |
+          {
+            "StartAt": "StartPipeline",
+            "States": {
+              "StartPipeline": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::sagemaker:startPipelineExecution",
+                "Parameters": {
+                  "PipelineName": "${SageMakerPipeline}",
+                  "PipelineExecutionDisplayName.$": "$.executionName",
+                  "PipelineParameters.$": "$.pipelineParameters"
+                },
+                "ResultPath": "$.pipelineExec",
+                "Next": "WaitBeforeDescribe"
+              },
+              "WaitBeforeDescribe": { "Type": "Wait", "Seconds": 30, "Next": "Describe" },
+              "Describe": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:sagemaker:describePipelineExecution",
+                "Parameters": {
+                  "PipelineExecutionArn.$": "$.pipelineExec.PipelineExecutionArn"
+                },
+                "ResultPath": "$.desc",
+                "Next": "Gate"
+              },
+              "Gate": {
+                "Type": "Choice",
+                "Choices": [
+                  { "Variable": "$.desc.PipelineExecutionStatus", "StringEquals": "Succeeded", "Next": "Success" },
+                  { "Variable": "$.desc.PipelineExecutionStatus", "StringEquals": "Failed", "Next": "Fail" },
+                  { "Variable": "$.desc.PipelineExecutionStatus", "StringEquals": "Stopped", "Next": "Fail" }
+                ],
+                "Default": "WaitBeforeDescribe"
+              },
+              "Fail": { "Type": "Fail" },
+              "Success": { "Type": "Succeed" }
+            }
+          }
+
+Outputs:
+  ArtifactsBucketName:
+    Value: !Ref ArtifactsBucket
+
+  EcrRepositoryUri:
+    Value: !GetAtt EcrRepository.RepositoryUri
+
+  SageMakerExecutionRoleArn:
+    Value: !GetAtt SageMakerExecutionRole.Arn
+
+  PipelineName:
+    Condition: DoCreatePipeline
+    Value: !Ref SageMakerPipeline
+
+  OrchestratorArn:
+    Condition: DoCreatePipeline
+    Value: !Ref Orchestrator
+
+  SfnLogGroup:
+    Value: !Ref SfnLogs
